@@ -361,41 +361,175 @@ Make sure Chrome is logged into the relevant account before the webinar. If the 
 
 **Note:** Since recording happens via BlackHole (system audio output), your microphone is never involved regardless of mute state. BlackHole captures only what the webinar plays to you.
 
-### Add the AppleScript join automation
+### Registration numbers
+
+Some platforms (Cvent in particular) email a unique registration confirmation link or number that is required to join — the generic event URL alone will not work. The scheduler extracts this automatically from your Gmail confirmation email.
+
+Save this as `~/scripts/extract_webinar_registration.py`:
+
+```python
+#!/usr/bin/env python3
+"""
+Searches Gmail for a webinar registration confirmation and extracts:
+- The unique join URL (preferred)
+- Or the registration/confirmation number as fallback
+
+Usage: python extract_webinar_registration.py "Event Title Keywords"
+Returns: the join URL or registration number, printed to stdout
+"""
+
+import os
+import re
+import sys
+import base64
+from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+import pickle
+
+SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+TOKEN_PATH = os.path.expanduser("~/credentials/gmail_token.pickle")
+CREDS_PATH = os.path.expanduser("~/credentials/gdrive_credentials.json")
+
+# Patterns to extract from confirmation emails
+JOIN_URL_PATTERNS = [
+    r"https://web\.cvent\.com/event/[^\s\"<>]+",         # Cvent unique join link
+    r"https://[^\s\"<>]+/join\?[^\s\"<>]+registrant[^\s\"<>]+",  # Zoom registrant link
+    r"https://[^\s\"<>]+\?tk=[^\s\"<>]+",                # generic token-based join
+]
+CONFIRMATION_PATTERNS = [
+    r"[Cc]onfirmation\s+(?:[Nn]umber|#|[Ii][Dd])[:\s]+([A-Z0-9\-]{6,})",
+    r"[Rr]egistration\s+(?:[Nn]umber|#|[Ii][Dd])[:\s]+([A-Z0-9\-]{6,})",
+    r"[Aa]ttendee\s+[Ii][Dd][:\s]+([A-Z0-9\-]{6,})",
+]
+
+def get_gmail_service():
+    creds = None
+    if os.path.exists(TOKEN_PATH):
+        with open(TOKEN_PATH, "rb") as f:
+            creds = pickle.load(f)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            raise RuntimeError("Gmail token missing — run gmail OAuth flow first")
+    return build("gmail", "v1", credentials=creds)
+
+def search_confirmation_email(service, keywords):
+    query = f"subject:(registration OR confirmation OR registered) {keywords}"
+    results = service.users().messages().list(userId="me", q=query, maxResults=5).execute()
+    return results.get("messages", [])
+
+def get_email_body(service, msg_id):
+    msg = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
+    parts = msg.get("payload", {}).get("parts", [])
+    body = ""
+    for part in parts:
+        if part.get("mimeType") == "text/plain":
+            data = part.get("body", {}).get("data", "")
+            body += base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+    if not body:
+        data = msg.get("payload", {}).get("body", {}).get("data", "")
+        if data:
+            body = base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+    return body
+
+def extract_join_info(body):
+    for pattern in JOIN_URL_PATTERNS:
+        match = re.search(pattern, body)
+        if match:
+            return ("url", match.group(0))
+    for pattern in CONFIRMATION_PATTERNS:
+        match = re.search(pattern, body)
+        if match:
+            return ("number", match.group(1))
+    return (None, None)
+
+if __name__ == "__main__":
+    keywords = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else ""
+    service = get_gmail_service()
+    messages = search_confirmation_email(service, keywords)
+    for msg in messages:
+        body = get_email_body(service, msg["id"])
+        kind, value = extract_join_info(body)
+        if value:
+            print(f"{kind}:{value}")
+            sys.exit(0)
+    print("none:")
+    sys.exit(1)
+```
+
+### Updated AppleScript — uses registration URL if found
 
 Save this as `~/scripts/join_webinar.applescript`:
 
 ```applescript
 on run argv
     set webinarURL to item 1 of argv
-    set yourName to "Yoni Gontownik"  -- shown if platform prompts for guest name
+    set regInfo to item 2 of argv  -- "url:https://..." or "number:ABC123" or "none:"
+    set yourName to "Yoni Gontownik"
+
+    -- use unique registration URL if found, otherwise fall back to generic URL
+    set joinURL to webinarURL
+    if regInfo starts with "url:" then
+        set joinURL to text 5 thru -1 of regInfo
+    end if
 
     tell application "Google Chrome"
-        open location webinarURL
+        open location joinURL
         activate
     end tell
 
-    -- wait for page to load
     delay 12
 
     tell application "System Events"
         tell process "Google Chrome"
-            -- if platform prompts for a name (guest join), type it
-            keystroke yourName
+            -- if platform prompts for name or confirmation number
+            if regInfo starts with "number:" then
+                set regNumber to text 8 thru -1 of regInfo
+                keystroke regNumber  -- enter confirmation number
+                delay 1
+                keystroke tab       -- move to next field
+                delay 0.5
+                keystroke yourName  -- enter name if prompted
+            else
+                keystroke yourName  -- guest join — just type name
+            end if
             delay 1
-            keystroke return  -- confirm name / click join
+            keystroke return  -- click join
 
-            -- ensure muted after joining (platform-specific shortcuts)
+            -- mute after joining
             delay 5
-            keystroke "d" using command down                   -- Zoom mute
-            keystroke "d" using {command down, shift down}    -- Google Meet mute
-            -- Cvent and most webinar platforms: attendees are muted by default
+            keystroke "d" using command down                   -- Zoom
+            keystroke "d" using {command down, shift down}    -- Google Meet
+            -- Cvent webinar attendees are muted by default
         end tell
     end tell
 end run
 ```
 
-Run it with: `osascript ~/scripts/join_webinar.applescript "https://your-webinar-url"`
+### How the scheduler calls it
+
+```python
+import subprocess
+
+# 1. search Gmail for registration info using event title keywords
+result = subprocess.run(
+    ["python", "~/scripts/extract_webinar_registration.py", meeting_title],
+    capture_output=True, text=True
+)
+reg_info = result.stdout.strip() or "none:"
+
+# 2. open Chrome with the correct URL + pass registration info
+subprocess.Popen([
+    "osascript", "~/scripts/join_webinar.applescript",
+    meeting_url,   # fallback URL from calendar event
+    reg_info       # "url:...", "number:...", or "none:"
+])
+
+# 3. start recording
+subprocess.Popen(["python", "call_recorder.py", "start", "--title", meeting_title])
+```
 
 ### Wire it into the scheduler
 
