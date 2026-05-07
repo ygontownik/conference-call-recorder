@@ -1,0 +1,12 @@
+.env
+*.pickle
+*.json
+!.env.example
+__pycache__/
+*.pyc
+output/
+recordings/
+*.mp3
+*.wav
+*.m4a
+.DS_Store
