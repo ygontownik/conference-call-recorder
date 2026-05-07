@@ -41,6 +41,63 @@ Google Drive → saved
 
 ---
 
+## Account Setup (do this first)
+
+### Twilio
+
+1. Go to [twilio.com](https://twilio.com) → **Sign Up** (free trial, no credit card required)
+2. Verify your email and phone number
+3. In the Console, click **Get a Trial Number** — this gives you a real US phone number for free
+4. Go to **Account → API keys & tokens** → copy **Account SID** and **Auth Token**
+5. Your trial number is your `TWILIO_PHONE_NUMBER` (format: `+1xxxxxxxxxx`)
+
+> Trial accounts can only call verified numbers. To call any number, upgrade to a paid account (~$1/mo for the number + per-minute usage).
+
+---
+
+### Railway
+
+1. Go to [railway.app](https://railway.app) → **Login with GitHub**
+2. No credit card needed — you get $5/mo free credit (enough for this server)
+3. You don't need to create a project yet — the CLI handles that in Setup step 4 below
+
+---
+
+### AssemblyAI
+
+1. Go to [assemblyai.com](https://assemblyai.com) → **Sign Up**
+2. Verify your email
+3. You get free credits on signup (~$50 worth)
+4. Go to **Dashboard → API Keys** → copy your key
+
+---
+
+### Anthropic (Claude)
+
+1. Go to [console.anthropic.com](https://console.anthropic.com) → **Sign Up**
+2. Add a payment method (pay-as-you-go, no subscription)
+3. Go to **API Keys** → **Create Key** → copy it
+4. Add $5–10 in credits to start — memo generation costs ~$0.02–0.05 per call
+
+---
+
+### Google Cloud (Drive API)
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com) → sign in with your Google account
+2. Click **Select a project** → **New Project** → name it (e.g. `call-recorder`) → **Create**
+3. In the left menu go to **APIs & Services → Library**
+4. Search for **Google Drive API** → click it → **Enable**
+5. Search for **Google Docs API** → click it → **Enable**
+6. Go to **APIs & Services → Credentials** → **Create Credentials → Service Account**
+7. Give it any name → click through to **Done**
+8. Click the service account you just created → go to **Keys** tab → **Add Key → Create new key → JSON** → download the file
+9. Save it to `~/credentials/service_account.json` on your Mac
+10. Go to [drive.google.com](https://drive.google.com) → create a new folder called **Call Recordings**
+11. Right-click the folder → **Share** → paste in your service account email (it looks like `name@project.iam.gserviceaccount.com`) → give it **Editor** access
+12. Open the folder → copy the ID from the URL: `drive.google.com/drive/folders/`**THIS_PART**
+
+---
+
 ## Prerequisites (Mac)
 
 ```bash
