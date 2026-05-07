@@ -344,6 +344,23 @@ pip install assemblyai anthropic google-auth google-auth-oauthlib google-api-pyt
 4. Go to **System Settings → Sound → Output** → select the Multi-Output Device
 5. You will now hear audio normally AND BlackHole captures it for recording
 
+### Who shows up and mute behavior
+
+**Display name:** The name shown in the webinar is pulled from whichever account Chrome is logged into:
+
+| Platform | Name source |
+|----------|------------|
+| Cvent | Your registration name from when you signed up for the event |
+| Zoom | Your Zoom account display name |
+| Google Meet | Your Google account name |
+| Teams | Your Microsoft account name |
+
+Make sure Chrome is logged into the relevant account before the webinar. If the event is guest-join (no login), the AppleScript below pre-fills your name before clicking join.
+
+**Mute:** Most webinar platforms (including Cvent) mute attendees by default — you have no mic to unmute. For platforms that don't auto-mute, the AppleScript handles it explicitly after joining.
+
+**Note:** Since recording happens via BlackHole (system audio output), your microphone is never involved regardless of mute state. BlackHole captures only what the webinar plays to you.
+
 ### Add the AppleScript join automation
 
 Save this as `~/scripts/join_webinar.applescript`:
@@ -351,15 +368,28 @@ Save this as `~/scripts/join_webinar.applescript`:
 ```applescript
 on run argv
     set webinarURL to item 1 of argv
+    set yourName to "Yoni Gontownik"  -- shown if platform prompts for guest name
+
     tell application "Google Chrome"
         open location webinarURL
         activate
     end tell
+
+    -- wait for page to load
     delay 12
+
     tell application "System Events"
         tell process "Google Chrome"
-            -- click the join button (works for most webinar platforms)
-            keystroke return
+            -- if platform prompts for a name (guest join), type it
+            keystroke yourName
+            delay 1
+            keystroke return  -- confirm name / click join
+
+            -- ensure muted after joining (platform-specific shortcuts)
+            delay 5
+            keystroke "d" using command down                   -- Zoom mute
+            keystroke "d" using {command down, shift down}    -- Google Meet mute
+            -- Cvent and most webinar platforms: attendees are muted by default
         end tell
     end tell
 end run
