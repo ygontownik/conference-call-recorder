@@ -6,26 +6,71 @@ Automatically records conference calls (Teams, Zoom, Google Meet, or any dial-in
 
 ---
 
-## How It Works
+## Two Recording Paths — Read This First
+
+This system handles **two different call types** with different automation paths. Know which one you need before setting up.
+
+| | Dial-in calls | Webinar / browser calls |
+|---|---|---|
+| **What it is** | Conference calls with a phone number + PIN (Teams, Zoom, any bridge) | Browser-based events: Cvent, GoToWebinar, Zoom webinar links, Google Meet |
+| **How it joins** | Twilio dials the number and PIN automatically | Chrome opens the URL; AppleScript clicks join |
+| **Audio capture** | Twilio records the call in the cloud | BlackHole captures system audio on your Mac |
+| **Transcription** | AssemblyAI | AssemblyAI (same) |
+| **Trigger** | Calendar event with a dial-in number | Calendar event with a webinar URL |
+| **Current dashboard support** | ✅ Fully supported | ⚠️ Requires additional setup (see Webinar Path below) |
+
+> **The current dashboard and scheduler are built for dial-in calls.** If your event has a webinar URL instead of a phone number, follow the Webinar Path section — the Twilio flow will not apply.
+
+---
+
+## How It Works — Dial-in Path
 
 ```
 Google Calendar / Outlook
-        ↓  (push notification)
+        ↓  (push notification — event has phone number + PIN)
 Railway (webhook_server.py)
         ↓  (forwards to your Mac)
 call_scheduler.py (Mac)
-        ↓  (schedules launchd job)
-call_recorder.py (Mac)
-        ↓  records audio via BlackHole
+        ↓  (schedules launchd job — Twilio dials in)
+Twilio  →  joins the call via phone
+call_recorder.py (Mac) records cloud audio
 AssemblyAI  →  transcript
 Claude      →  structured memo
 Google Drive → saved
 ```
 
-1. Your calendar sends a push notification to Railway when a meeting is created or updated.
-2. Railway forwards it to your Mac (via a public tunnel URL).
-3. The Mac scheduler creates a launchd job timed to start recording when the call begins.
-4. `call_recorder.py` captures system audio (BlackHole virtual audio driver), sends it to AssemblyAI for transcription, generates a memo via Claude, and uploads both to Google Drive.
+1. Your calendar sends a push notification to Railway when a meeting with a dial-in number is created.
+2. Railway forwards it to your Mac.
+3. The Mac scheduler creates a launchd job; Twilio dials the conference bridge at the right time.
+4. AssemblyAI transcribes, Claude generates memo, both upload to Google Drive.
+
+---
+
+## How It Works — Webinar Path
+
+```
+Google Calendar / Outlook
+        ↓  (push notification — event has webinar URL)
+call_scheduler.py (Mac)
+        ↓  (schedules launchd job — opens Chrome)
+Chrome opens webinar URL → AppleScript clicks join
+BlackHole captures system audio
+call_recorder.py (Mac) records local audio
+AssemblyAI  →  transcript
+Claude      →  structured memo
+Google Drive → saved
+```
+
+1. Your calendar event contains a webinar URL (Cvent, Zoom, Meet, etc.).
+2. The scheduler extracts the URL and opens Chrome at T-2min.
+3. AppleScript clicks the join button.
+4. BlackHole captures all browser audio; `call_recorder.py` records it.
+5. Same transcription and Drive upload as the dial-in path.
+
+**Additional setup required for webinar path:**
+- BlackHole must be set as your Mac's system audio output
+- AppleScript join automation (see Webinar Setup section below)
+- Railway/Twilio are **not used** in this path
 
 ---
 
@@ -277,6 +322,75 @@ python call_recorder.py start --engine deepgram
 | `WEBHOOK_SECRET` | Any random string — must match on Railway and Mac |
 | `RAILWAY_URL` | Your Railway app URL after deploying |
 | `MAC_SCHEDULER_URL` | Your ngrok tunnel URL |
+
+---
+
+## Webinar Setup (browser-based calls)
+
+If you skipped the Twilio/Railway setup because your calls are webinar links, you only need:
+
+### What to install
+
+```bash
+brew install blackhole-2ch ffmpeg
+pip install assemblyai anthropic google-auth google-auth-oauthlib google-api-python-client
+```
+
+### Configure BlackHole as system output
+
+1. Open **Audio MIDI Setup** (search in Spotlight)
+2. Click **+** → **Create Multi-Output Device**
+3. Check both **BlackHole 2ch** and your speakers/headphones
+4. Go to **System Settings → Sound → Output** → select the Multi-Output Device
+5. You will now hear audio normally AND BlackHole captures it for recording
+
+### Add the AppleScript join automation
+
+Save this as `~/scripts/join_webinar.applescript`:
+
+```applescript
+on run argv
+    set webinarURL to item 1 of argv
+    tell application "Google Chrome"
+        open location webinarURL
+        activate
+    end tell
+    delay 12
+    tell application "System Events"
+        tell process "Google Chrome"
+            -- click the join button (works for most webinar platforms)
+            keystroke return
+        end tell
+    end tell
+end run
+```
+
+Run it with: `osascript ~/scripts/join_webinar.applescript "https://your-webinar-url"`
+
+### Wire it into the scheduler
+
+In `call_scheduler.py`, the scheduler already extracts meeting URLs from calendar events. Add this to the job creation logic:
+
+```python
+if is_webinar_url(meeting_url):  # checks for cvent/zoom/meet/teams patterns
+    # open browser + start BlackHole recording
+    subprocess.Popen(["osascript", "~/scripts/join_webinar.applescript", meeting_url])
+    subprocess.Popen(["python", "call_recorder.py", "start", "--title", meeting_title])
+else:
+    # existing dial-in path via Twilio
+    twilio_dial(meeting_phone, meeting_pin)
+```
+
+### Env vars needed (webinar path only)
+
+```
+ASSEMBLYAI_API_KEY=...
+ANTHROPIC_API_KEY=...
+GOOGLE_SERVICE_ACCOUNT_JSON=...
+GOOGLE_DRIVE_FOLDER_ID=...
+```
+
+Twilio, Railway, and ngrok are **not required** for the webinar path.
 
 ---
 
