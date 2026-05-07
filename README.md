@@ -1,176 +1,235 @@
-# COS Pipeline — Chief of Staff AI System
+# Conference Call Recorder
 
-A local AI pipeline that processes emails, call transcripts, and market research into structured action items, deal intelligence, and daily briefings — all routed to Google Docs and a local dashboard.
+Automatically records conference calls (Teams, Zoom, Google Meet, or any dial-in) on Mac, transcribes via AssemblyAI, generates a structured memo via Claude, and saves everything to Google Drive.
 
-Built as two packages that can be deployed independently:
-
-| Package | What it does |
-|---------|-------------|
-| **Package B — Operations** | Triages Gmail, processes Otter AI + call transcripts, extracts action items and deal intel, writes to Follow-ups / Pipeline / Recruiting / People docs |
-| **Package A — Market Intelligence** | Transcribes podcasts, processes Jefferies/GS/RBN research PDFs, generates IC memos and deal ideas via a 3-pass pipeline |
-
-The dashboard (always full) shows all tiles. Tabs without an active package display an empty state.
+**Stack:** Twilio · Railway · AssemblyAI · Claude (Anthropic) · Google Drive
 
 ---
 
-## Quick Start — New Firm Setup
+## How It Works
 
-### 1. Copy and fill in the identity configs
-
-```bash
-cp firm_context.template.yaml firm_context.yaml
-cp firm_config.template.json firm_config.json
-cp config/drive-docs.template.yaml ~/dashboards/config/drive-docs.yaml
+```
+Google Calendar / Outlook
+        ↓  (push notification)
+Railway (webhook_server.py)
+        ↓  (forwards to your Mac)
+call_scheduler.py (Mac)
+        ↓  (schedules launchd job)
+call_recorder.py (Mac)
+        ↓  records audio via BlackHole
+AssemblyAI  →  transcript
+Claude      →  structured memo
+Google Drive → saved
 ```
 
-Edit `firm_context.yaml` — your name, firm, team, investment focus, peer firms.
-Edit `firm_config.json` — your Google Doc IDs, email keywords, active packages.
-Edit `drive-docs.yaml` — your specific Google Doc and folder IDs.
+1. Your calendar sends a push notification to Railway when a meeting is created or updated.
+2. Railway forwards it to your Mac (via a public tunnel URL).
+3. The Mac scheduler creates a launchd job timed to start recording when the call begins.
+4. `call_recorder.py` captures system audio (BlackHole virtual audio driver), sends it to AssemblyAI for transcription, generates a memo via Claude, and uploads both to Google Drive.
 
-All three files are gitignored and never committed.
+---
 
-### 2. Install dependencies
+## Accounts You Need
+
+| Service | Free tier? | What it's for |
+|---------|-----------|---------------|
+| [Twilio](https://twilio.com) | Yes (trial) | Dials into conference calls |
+| [Railway](https://railway.app) | Yes ($5/mo credit) | Hosts the webhook server |
+| [AssemblyAI](https://assemblyai.com) | Yes (free credits) | Transcription (~$0.009/min) |
+| [Anthropic](https://console.anthropic.com) | Pay-as-you-go | Memo generation |
+| Google Cloud | Free | Drive API for saving output |
+
+---
+
+## Prerequisites (Mac)
 
 ```bash
-pip install pyyaml google-auth google-auth-oauthlib google-auth-httplib2 anthropic
+# Virtual audio driver — routes system audio to recorder
+brew install blackhole-2ch
+
+# Audio recording
+brew install ffmpeg
+
+# Python deps
+pip install flask requests gunicorn twilio assemblyai anthropic \
+    google-auth google-auth-oauthlib google-api-python-client pyyaml
 ```
 
-### 3. Set required secrets
+After installing BlackHole, open **System Settings → Sound → Output** and select **BlackHole 2ch** (or create a Multi-Output Device in Audio MIDI Setup so you hear audio AND it records simultaneously).
+
+---
+
+## Setup
+
+### 1. Clone the repo
 
 ```bash
-# For interactive/manual runs — set environment variables:
-export ANTHROPIC_API_KEY="sk-ant-..."
-export DASHBOARD_USERNAME="admin"
-export DASHBOARD_PASSWORD="your-password"
-
-# For scheduled LaunchAgents (macOS) — store in Keychain:
-security add-generic-password -s "dashboards/ANTHROPIC_API_KEY"    -a "$USER" -w "sk-ant-..."
-security add-generic-password -s "dashboards/DASHBOARD_USERNAME"   -a "$USER" -w "admin"
-security add-generic-password -s "dashboards/DASHBOARD_PASSWORD"   -a "$USER" -w "your-password"
+git clone https://github.com/ygontownik/conference-call-recorder.git
+cd conference-call-recorder
 ```
 
-### 4. Run the setup validator
+### 2. Set environment variables
+
+Copy the template and fill in your keys:
 
 ```bash
-python3 setup.py
+cp .env.example .env
 ```
 
-Checks all required config fields are filled, credential files exist, and the Anthropic API key responds.
+Edit `.env`:
 
-### 5. Authorize Google APIs (first run)
+```
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_AUTH_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_PHONE_NUMBER=+1xxxxxxxxxx
 
-The first run of each script triggers a browser OAuth flow. Tokens are saved to `~/credentials/` and reused.
+ASSEMBLYAI_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+GOOGLE_SERVICE_ACCOUNT_JSON=~/credentials/service_account.json
+GOOGLE_DRIVE_FOLDER_ID=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+WEBHOOK_SECRET=any-random-string-you-choose
+RAILWAY_URL=https://your-app.railway.app   # fill in after step 4
+MAC_SCHEDULER_URL=https://your-ngrok-url   # fill in after step 5
+```
+
+### 3. Set up Google Drive
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com)
+2. Create a project → enable **Google Drive API** and **Google Docs API**
+3. Create a **Service Account** → download the JSON key → save to `~/credentials/service_account.json`
+4. Create a folder in Google Drive for call recordings → copy the folder ID from the URL
+5. Share that folder with your service account email (it looks like `name@project.iam.gserviceaccount.com`)
+
+### 4. Deploy webhook server to Railway
 
 ```bash
-python3 cos_gmail_mini_v2.py --list --backfill 2h   # Gmail OAuth
-python3 cos_otter_backfill.py --list                  # Drive/Docs OAuth
+# Install Railway CLI
+npm install -g @railway/cli
+
+# Log in
+railway login
+
+# Create a new project
+railway init
+
+# Deploy
+railway up
+```
+
+In the Railway dashboard, go to **Variables** and add all env vars from your `.env` file.
+
+Copy your Railway app URL (e.g. `https://your-app.railway.app`) and set it as `RAILWAY_URL` in your `.env`.
+
+### 5. Expose your Mac with ngrok
+
+Railway needs to reach your Mac to forward calendar notifications.
+
+```bash
+# Install ngrok
+brew install ngrok
+
+# Start a tunnel on port 8765 (or whichever port call_scheduler uses)
+ngrok http 8765
+```
+
+Copy the `https://xxxx.ngrok.io` URL and set it as `MAC_SCHEDULER_URL` in your `.env` and in Railway's Variables.
+
+### 6. Start the Mac scheduler
+
+```bash
+# Load env vars
+source .env   # or add them to ~/.zshrc
+
+# Register calendar subscriptions (one-time)
+python call_scheduler.py register
+
+# Start the scheduler daemon
+python call_scheduler.py start
+```
+
+The scheduler will listen for forwarded notifications from Railway and create launchd jobs for upcoming calls.
+
+### 7. Test it
+
+Manually trigger a recording:
+
+```bash
+# Start recording
+python call_recorder.py start
+
+# Stop, transcribe, generate memo, upload to Drive
+python call_recorder.py stop
+```
+
+Check your Google Drive folder — you should see a transcript + memo doc.
+
+---
+
+## Usage
+
+```bash
+# Start recording now (prompts for call title)
+python call_recorder.py start
+
+# Stop and process (transcribe → memo → Drive)
+python call_recorder.py stop
+
+# Transcribe an existing audio file
+python call_recorder.py transcribe --file ~/recordings/call.mp3
+
+# List recent calls
+python call_recorder.py list
+
+# Check scheduled upcoming recordings
+python call_scheduler.py list
 ```
 
 ---
 
-## File Map — What Goes Where
+## Transcription Engines
 
-### Firm-specific (fill these in, never committed to git)
+| Engine | Cost/min | Quality |
+|--------|----------|---------|
+| AssemblyAI default | ~$0.009 | Best — speaker diarization |
+| AssemblyAI nano | ~$0.002 | Good for business English |
+| Deepgram Nova-2 | ~$0.0043 | Good alternative |
 
-| File | Purpose | Location |
-|------|---------|----------|
-| `firm_context.yaml` | Principal identity, team, investment focus, peer firms | `~/tomac-cove-pipeline/` |
-| `firm_config.json` | Email keywords, Google Doc IDs, active packages | `~/tomac-cove-pipeline/` |
-| `drive-docs.yaml` | Registry of all Drive doc/folder IDs | `~/dashboards/config/` |
-| `~/credentials/*.pickle` | Google OAuth tokens | `~/credentials/` |
-| `~/credentials/*.json` | OAuth client credentials | `~/credentials/` |
-
-### Templates (committed — copy these to produce the above)
-
-| Template | Produces |
-|----------|----------|
-| `firm_context.template.yaml` | `firm_context.yaml` |
-| `firm_config.template.json` | `firm_config.json` |
-| `config/drive-docs.template.yaml` | `~/dashboards/config/drive-docs.yaml` |
-
-### Package B — Operations (committed)
-
-| Script | What it does | Schedule |
-|--------|-------------|---------|
-| `cos_gmail_mini_v2.py` | Gmail triage — Haiku classifies all, Sonnet enriches DEAL/RECRUIT | Every 2h, Mon–Fri |
-| `cos_otter_backfill.py` | Otter AI + call transcript processor — Sonnet memo, Opus deal extraction | Daily |
-| `cos_transcript_hook.py` | Real-time hook triggered after each new recording | Post-call |
-
-### Package A — Market Intelligence (committed)
-
-| Script | What it does | Schedule |
-|--------|-------------|---------|
-| `podcast_transcribe.py` | Transcribes + summarizes podcast episodes via AssemblyAI + Claude | Daily |
-| `deal-dashboard-refresh.py` | 3-pass pipeline: scan → analyze → IC memo | Weekly |
-
-### Core shared modules (committed)
-
-| Module | Purpose |
-|--------|---------|
-| `_firm_context.py` | Loads `firm_context.yaml`; builds all model preambles; `load_drive_docs()` |
-| `_entity_normalizer.py` | Canonical entity resolution (firms, people, deal names) |
-| `_envelope_writer.py` | Writes structured action/intel envelopes to dashboard data |
-| `_usage.py` | Logs Anthropic API usage to `~/dashboards/data/anthropic-usage.jsonl` |
-
-### Dashboard (committed)
-
-| Script/File | Purpose |
-|-------------|---------|
-| `cos-dashboard-server.py` | Local HTTP server on :7777; reads `dashboard-tiles.yaml` + `firm_config.json` |
-| `cos-dashboard-fetch.py` | Fetches Google Docs → `dashboard-data.json` cache |
-| `cos-dashboard-refresh.py` | Fast HTML inject from cache (~2ms) |
-| `config/dashboard-tiles.yaml` | Tile registry — titles, URLs, auth tiers, `requires_package` |
-| `config/routing-rules.md` | LLM-agnostic envelope routing contract |
+Override at runtime:
+```bash
+python call_recorder.py start --engine assemblyai
+python call_recorder.py start --engine assemblyai-nano
+python call_recorder.py start --engine deepgram
+```
 
 ---
 
-## Architecture — How the Prompts Work
+## Environment Variables Reference
 
-Every script that sends transcripts to Claude builds its model preamble at import time from `firm_context.yaml` via `_firm_context.py`. No name, firm, team member, or investment focus is hardcoded in any script.
-
-```
-firm_context.yaml
-      ↓
-_firm_context.py → build_memo_header()       → MEMO_PREAMBLE
-                 → build_backfill_header()   → BACKFILL_PREAMBLE
-                 → build_extraction_header() → EXTRACTION_PREAMBLE
-                 → load_drive_docs()         → FOLLOW_UPS_DOC, TOMAC_DOC, ...
-                 → load_active_packages()    → dashboard tile visibility
-```
-
-**Model routing:**
-
-| Pass | Script | Model | Rationale |
-|------|--------|-------|-----------|
-| Email triage | `cos_gmail_mini_v2.py` | `claude-haiku-4-5-20251001` | Fast, cheap — every email |
-| Email enrich | `cos_gmail_mini_v2.py` | `claude-sonnet-4-6` | DEAL/RECRUIT only |
-| Transcript memo | `cos_otter_backfill.py` | `claude-sonnet-4-6` | Format-constrained prose |
-| Deal extraction | `cos_otter_backfill.py` | `claude-opus-4-7` | Multi-hop deal/LP inference |
-| Real-time hook | `cos_transcript_hook.py` | `claude-sonnet-4-6` | Fast, runs post-call |
+| Variable | Where to get it |
+|----------|----------------|
+| `TWILIO_ACCOUNT_SID` | Twilio Console → Account Info |
+| `TWILIO_AUTH_TOKEN` | Twilio Console → Account Info |
+| `TWILIO_PHONE_NUMBER` | Twilio Console → Phone Numbers |
+| `ASSEMBLYAI_API_KEY` | assemblyai.com → API Keys |
+| `ANTHROPIC_API_KEY` | console.anthropic.com → API Keys |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | Google Cloud Console → IAM → Service Accounts |
+| `GOOGLE_DRIVE_FOLDER_ID` | From Drive folder URL: `drive.google.com/drive/folders/THIS_PART` |
+| `WEBHOOK_SECRET` | Any random string — must match on Railway and Mac |
+| `RAILWAY_URL` | Your Railway app URL after deploying |
+| `MAC_SCHEDULER_URL` | Your ngrok tunnel URL |
 
 ---
 
-## Package Deployment
+## Cost Estimate
 
-Set `"packages"` in `firm_config.json` to control which pipelines are active:
+| Component | Cost |
+|-----------|------|
+| 1-hour call (AssemblyAI default) | ~$0.54 |
+| Claude memo generation | ~$0.02–0.05 |
+| Railway hosting | ~$0–5/mo |
+| Twilio (inbound/outbound minutes) | ~$0.01–0.02/min |
 
-```json
-{ "packages": ["operations"] }                               // Package B only
-{ "packages": ["market_intelligence"] }                      // Package A only
-{ "packages": ["market_intelligence", "operations"] }        // Both (default)
-```
-
-The dashboard always shows all tiles. Tiles whose `requires_package` is not in the active list render with `package_active: false` — the server shows an empty state for those tabs.
-
----
-
-## Cost Profile (approximate, prompt caching enabled)
-
-| Pipeline | Model | Cost/run |
-|----------|-------|----------|
-| Gmail mini (50 emails) | Haiku + Sonnet | ~$0.02–0.08 |
-| Transcript backfill | Sonnet + Opus | ~$0.10–0.50/transcript |
-| Real-time hook | Sonnet | ~$0.02–0.05/call |
-| Podcast transcription | AssemblyAI + Sonnet | ~$0.009/min audio |
-
-Prompt caching is enabled on all stable preambles. The firm identity header caches across all items in a single run, reducing effective input cost by ~90%.
+Total per call: **~$0.60–1.00** depending on length.
